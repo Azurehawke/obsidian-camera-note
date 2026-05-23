@@ -1,0 +1,22 @@
+{
+	"name": "obsidian-camera-note",
+	"version": "1.0.0",
+	"description": "Take a picture, crop it, and insert it into your note.",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "node esbuild.config.mjs production"
+	},
+	"author": "Steve",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^16.11.29",
+		"@typescript-eslint/eslint-plugin": "5.29.0",
+		"@typescript-eslint/parser": "5.29.0",
+		"builtin-modules": "3.3.0",
+		"esbuild": "^0.28.0",
+		"obsidian": "latest",
+		"tslib": "2.4.0",
+		"typescript": "4.7.4"
+	}
+}
