@@ -144,6 +144,43 @@ var CameraModal = class extends import_obsidian.Modal {
         this.cropHeight = Math.abs(this.cropHeight);
       }
     });
+    this.overlayCanvasEl.addEventListener("touchstart", (e) => {
+      if (!this.isCropping) return;
+      e.preventDefault();
+      const touch = e.touches[0];
+      const rect = this.overlayCanvasEl.getBoundingClientRect();
+      const scaleX = this.overlayCanvasEl.width / rect.width;
+      const scaleY = this.overlayCanvasEl.height / rect.height;
+      this.cropStartX = (touch.clientX - rect.left) * scaleX;
+      this.cropStartY = (touch.clientY - rect.top) * scaleY;
+      this.cropWidth = 0;
+      this.cropHeight = 0;
+      this.isDragging = true;
+    }, { passive: false });
+    this.overlayCanvasEl.addEventListener("touchmove", (e) => {
+      if (!this.isDragging) return;
+      e.preventDefault();
+      const touch = e.touches[0];
+      const rect = this.overlayCanvasEl.getBoundingClientRect();
+      const scaleX = this.overlayCanvasEl.width / rect.width;
+      const scaleY = this.overlayCanvasEl.height / rect.height;
+      const currentX = (touch.clientX - rect.left) * scaleX;
+      const currentY = (touch.clientY - rect.top) * scaleY;
+      this.cropWidth = currentX - this.cropStartX;
+      this.cropHeight = currentY - this.cropStartY;
+      this.drawOverlay();
+    }, { passive: false });
+    this.overlayCanvasEl.addEventListener("touchend", (e) => {
+      this.isDragging = false;
+      if (this.cropWidth < 0) {
+        this.cropStartX += this.cropWidth;
+        this.cropWidth = Math.abs(this.cropWidth);
+      }
+      if (this.cropHeight < 0) {
+        this.cropStartY += this.cropHeight;
+        this.cropHeight = Math.abs(this.cropHeight);
+      }
+    });
   }
   drawOverlay() {
     const ctx = this.overlayCanvasEl.getContext("2d");
