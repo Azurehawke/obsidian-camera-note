@@ -74,12 +74,18 @@ var CameraModal = class extends import_obsidian.Modal {
     this.setupCroppingEvents();
     if (import_obsidian.Platform.isMobile) {
       this.captureBtn = controls.createEl("button", { text: "Take Photo" });
-      const fileInput = contentEl.createEl("input", {
-        attr: { type: "file", accept: "image/*", capture: "environment" }
+      this.captureBtn.addEventListener("click", () => {
+        const fileInput = document.createElement("input");
+        fileInput.setAttribute("type", "file");
+        fileInput.setAttribute("accept", "image/jpeg");
+        fileInput.setAttribute("capture", "environment");
+        document.body.appendChild(fileInput);
+        fileInput.addEventListener("change", () => {
+          this.handleFileCapture(fileInput);
+          document.body.removeChild(fileInput);
+        });
+        fileInput.click();
       });
-      fileInput.style.display = "none";
-      fileInput.addEventListener("change", () => this.handleFileCapture(fileInput));
-      this.captureBtn.addEventListener("click", () => fileInput.click());
     } else {
       this.videoEl = container.createEl("video");
       this.videoEl.autoplay = true;
