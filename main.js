@@ -74,10 +74,9 @@ var CameraModal = class extends import_obsidian.Modal {
     this.setupCroppingEvents();
     if (import_obsidian.Platform.isMobile) {
       this.captureBtn = controls.createEl("button", { text: "Take Photo" });
-      const fileInput = contentEl.createEl("input");
-      fileInput.type = "file";
-      fileInput.accept = "image/*";
-      fileInput.capture = "environment";
+      const fileInput = contentEl.createEl("input", {
+        attr: { type: "file", accept: "image/*", capture: "environment" }
+      });
       fileInput.style.display = "none";
       fileInput.addEventListener("change", () => this.handleFileCapture(fileInput));
       this.captureBtn.addEventListener("click", () => fileInput.click());
