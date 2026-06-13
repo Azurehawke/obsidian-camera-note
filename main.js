@@ -66,18 +66,29 @@ var CameraModal = class extends import_obsidian.Modal {
     contentEl.classList.add("camera-note-modal");
     contentEl.createEl("h2", { text: "Take a Picture" });
     const container = contentEl.createDiv({ cls: "camera-container" });
-    this.videoEl = container.createEl("video");
-    this.videoEl.autoplay = true;
-    this.videoEl.playsInline = true;
     this.canvasEl = container.createEl("canvas", { cls: "hidden" });
     this.overlayCanvasEl = container.createEl("canvas", { cls: "hidden overlay-canvas" });
     const controls = contentEl.createDiv({ cls: "camera-controls" });
-    this.captureBtn = controls.createEl("button", { text: "Capture" });
     this.saveBtn = controls.createEl("button", { text: "Crop & Save", cls: "hidden mod-cta" });
-    this.captureBtn.addEventListener("click", () => this.captureImage());
     this.saveBtn.addEventListener("click", () => this.saveImage());
     this.setupCroppingEvents();
-    this.startCamera();
+    if (import_obsidian.Platform.isMobile) {
+      this.captureBtn = controls.createEl("button", { text: "Take Photo" });
+      const fileInput = contentEl.createEl("input");
+      fileInput.type = "file";
+      fileInput.accept = "image/*";
+      fileInput.capture = "environment";
+      fileInput.style.display = "none";
+      fileInput.addEventListener("change", () => this.handleFileCapture(fileInput));
+      this.captureBtn.addEventListener("click", () => fileInput.click());
+    } else {
+      this.videoEl = container.createEl("video");
+      this.videoEl.autoplay = true;
+      this.videoEl.playsInline = true;
+      this.captureBtn = controls.createEl("button", { text: "Capture" });
+      this.captureBtn.addEventListener("click", () => this.captureImage());
+      this.startCamera();
+    }
   }
   async startCamera() {
     try {
@@ -109,6 +120,34 @@ var CameraModal = class extends import_obsidian.Modal {
     this.cropHeight = this.canvasEl.height;
     this.isCropping = true;
     this.drawOverlay();
+  }
+  handleFileCapture(fileInput) {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      this.canvasEl.width = img.naturalWidth;
+      this.canvasEl.height = img.naturalHeight;
+      this.overlayCanvasEl.width = img.naturalWidth;
+      this.overlayCanvasEl.height = img.naturalHeight;
+      const ctx = this.canvasEl.getContext("2d");
+      if (ctx) ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      this.canvasEl.classList.remove("hidden");
+      this.overlayCanvasEl.classList.remove("hidden");
+      this.captureBtn.classList.add("hidden");
+      this.saveBtn.classList.remove("hidden");
+      this.cropWidth = this.canvasEl.width;
+      this.cropHeight = this.canvasEl.height;
+      this.isCropping = true;
+      this.drawOverlay();
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      new import_obsidian.Notice("Failed to load captured image.");
+    };
+    img.src = url;
   }
   setupCroppingEvents() {
     this.overlayCanvasEl.addEventListener("mousedown", (e) => {
