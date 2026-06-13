@@ -1,7 +1,7 @@
 {
 	"id": "obsidian-camera-note",
 	"name": "Camera Note",
-	"version": "1.2.0",
+	"version": "1.2.1",
 	"minAppVersion": "1.0.0",
 	"description": "Take a picture, crop it, and insert it into your note.",
 	"author": "Steve",
