@@ -39,8 +39,18 @@ var CameraNotePlugin = class extends import_obsidian.Plugin {
         new CameraModal(this.app, editor, ctx.file || null).open();
       }
     });
+    this.addCommand({
+      id: "pdf-sketch-and-insert",
+      name: "PDF Sketch and Insert",
+      editorCallback: (editor, ctx) => {
+        new PDFSketchModal(this.app, editor, ctx.file || null).open();
+      }
+    });
   }
 };
+
+// ── Camera Modal ─────────────────────────────────────────────────────────────
+
 var CameraModal = class extends import_obsidian.Modal {
   constructor(app, editor, file) {
     super(app);
@@ -290,6 +300,337 @@ var CameraModal = class extends import_obsidian.Modal {
     if (this.stream) {
       this.stream.getTracks().forEach((track) => track.stop());
     }
+    this.contentEl.empty();
+  }
+};
+
+// ── PDF Sketch Modal ──────────────────────────────────────────────────────────
+
+var PDFJS_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+var PDFJS_WORKER_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+var PDFSketchModal = class extends import_obsidian.Modal {
+  constructor(app, editor, file) {
+    super(app);
+    __publicField(this, "editor");
+    __publicField(this, "file");
+    // PDF state
+    __publicField(this, "pdfDoc", null);
+    __publicField(this, "currentPage", 1);
+    __publicField(this, "totalPages", 0);
+    // Canvas elements
+    __publicField(this, "bgCanvas");
+    __publicField(this, "drawCanvas");
+    __publicField(this, "pageInfoEl");
+    __publicField(this, "pageNavEl");
+    // Drawing state
+    __publicField(this, "isDrawing", false);
+    __publicField(this, "currentTool", "pen");
+    __publicField(this, "currentColor", "#000000");
+    __publicField(this, "lineWidth", 3);
+    __publicField(this, "lastX", 0);
+    __publicField(this, "lastY", 0);
+    this.editor = editor;
+    this.file = file;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.classList.add("camera-note-modal", "pdf-sketch-modal");
+    contentEl.createEl("h2", { text: "PDF Sketch" });
+
+    // ── PDF loader ────────────────────────────────────────────────────────────
+    const loaderRow = contentEl.createDiv({ cls: "pdf-sketch-loader" });
+
+    const pdfSelect = loaderRow.createEl("select", { cls: "pdf-sketch-select" });
+    pdfSelect.createEl("option", { value: "", text: "-- Select a PDF from vault --" });
+    const pdfFiles = this.app.vault.getFiles().filter((f) => f.extension === "pdf");
+    for (const pf of pdfFiles) {
+      pdfSelect.createEl("option", { value: pf.path, text: pf.path });
+    }
+
+    const loadBtn = loaderRow.createEl("button", { text: "Load PDF" });
+
+    // ── Page navigation ───────────────────────────────────────────────────────
+    this.pageNavEl = contentEl.createDiv({ cls: "pdf-sketch-page-nav hidden" });
+    const prevBtn = this.pageNavEl.createEl("button", { text: "← Prev", cls: "pdf-sketch-nav-btn" });
+    this.pageInfoEl = this.pageNavEl.createEl("span", { cls: "pdf-sketch-page-info", text: "Page 1 / 1" });
+    const nextBtn = this.pageNavEl.createEl("button", { text: "Next →", cls: "pdf-sketch-nav-btn" });
+
+    // ── Drawing toolbar ───────────────────────────────────────────────────────
+    const toolbar = contentEl.createDiv({ cls: "pdf-sketch-toolbar" });
+
+    const penBtn = toolbar.createEl("button", { text: "✏ Pen", cls: "pdf-sketch-tool-btn active" });
+    const eraserBtn = toolbar.createEl("button", { text: "◻ Eraser", cls: "pdf-sketch-tool-btn" });
+
+    const colorLabel = toolbar.createEl("label", { cls: "pdf-sketch-label", text: "Color " });
+    const colorInput = colorLabel.createEl("input", { attr: { type: "color", value: "#000000" } });
+
+    const sizeLabel = toolbar.createEl("label", { cls: "pdf-sketch-label", text: "Size " });
+    const sizeInput = sizeLabel.createEl("input", {
+      attr: { type: "range", min: "1", max: "30", value: "3" }
+    });
+
+    const clearBtn = toolbar.createEl("button", { text: "Clear", cls: "pdf-sketch-tool-btn" });
+
+    // ── Canvas container ──────────────────────────────────────────────────────
+    const container = contentEl.createDiv({ cls: "camera-container pdf-sketch-container" });
+
+    // Background canvas – rendered PDF page lives here
+    this.bgCanvas = container.createEl("canvas", { cls: "pdf-sketch-bg-canvas" });
+    // Drawing canvas – transparent overlay the user draws on
+    this.drawCanvas = container.createEl("canvas", { cls: "pdf-sketch-draw-canvas overlay-canvas" });
+
+    // ── Save button ───────────────────────────────────────────────────────────
+    const controls = contentEl.createDiv({ cls: "camera-controls" });
+    const saveBtn = controls.createEl("button", { text: "Save & Insert", cls: "mod-cta" });
+
+    // ── Wire up event handlers ────────────────────────────────────────────────
+    loadBtn.addEventListener("click", async () => {
+      const selectedPath = pdfSelect.value;
+      if (!selectedPath) {
+        new import_obsidian.Notice("Please select a PDF file first.");
+        return;
+      }
+      loadBtn.disabled = true;
+      loadBtn.textContent = "Loading…";
+      try {
+        await this.loadPDF(selectedPath);
+      } finally {
+        loadBtn.disabled = false;
+        loadBtn.textContent = "Load PDF";
+      }
+    });
+
+    prevBtn.addEventListener("click", async () => {
+      if (this.currentPage > 1) {
+        this.currentPage--;
+        await this.renderPage(this.currentPage);
+      }
+    });
+
+    nextBtn.addEventListener("click", async () => {
+      if (this.currentPage < this.totalPages) {
+        this.currentPage++;
+        await this.renderPage(this.currentPage);
+      }
+    });
+
+    penBtn.addEventListener("click", () => {
+      this.currentTool = "pen";
+      penBtn.classList.add("active");
+      eraserBtn.classList.remove("active");
+      this.drawCanvas.style.cursor = "crosshair";
+    });
+
+    eraserBtn.addEventListener("click", () => {
+      this.currentTool = "eraser";
+      eraserBtn.classList.add("active");
+      penBtn.classList.remove("active");
+      this.drawCanvas.style.cursor = "cell";
+    });
+
+    colorInput.addEventListener("input", (e) => {
+      this.currentColor = e.target.value;
+    });
+
+    sizeInput.addEventListener("input", (e) => {
+      this.lineWidth = parseInt(e.target.value, 10);
+    });
+
+    clearBtn.addEventListener("click", () => {
+      const ctx = this.drawCanvas.getContext("2d");
+      if (ctx) ctx.clearRect(0, 0, this.drawCanvas.width, this.drawCanvas.height);
+    });
+
+    saveBtn.addEventListener("click", () => this.saveSketch());
+
+    // ── Drawing events ────────────────────────────────────────────────────────
+    this.setupDrawingEvents();
+
+    // Start with a default blank canvas size
+    this.setCanvasSize(800, 600);
+  }
+
+  setCanvasSize(width, height) {
+    this.bgCanvas.width = width;
+    this.bgCanvas.height = height;
+    this.drawCanvas.width = width;
+    this.drawCanvas.height = height;
+    // Fill background white so the canvas isn't transparent
+    const ctx = this.bgCanvas.getContext("2d");
+    if (ctx) {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, width, height);
+    }
+  }
+
+  async ensurePDFJS() {
+    if (window.pdfjsLib) return;
+    await new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = PDFJS_CDN;
+      script.onload = () => {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN;
+        resolve();
+      };
+      script.onerror = () =>
+        reject(new Error("Could not load PDF.js. An internet connection is required for the first use."));
+      document.head.appendChild(script);
+    });
+  }
+
+  async loadPDF(pdfPath) {
+    try {
+      await this.ensurePDFJS();
+    } catch (err) {
+      new import_obsidian.Notice(err.message);
+      return;
+    }
+
+    try {
+      const resourceUrl = this.app.vault.adapter.getResourcePath(pdfPath);
+      const loadingTask = window.pdfjsLib.getDocument(resourceUrl);
+      this.pdfDoc = await loadingTask.promise;
+      this.totalPages = this.pdfDoc.numPages;
+      this.currentPage = 1;
+      this.pageNavEl.classList.remove("hidden");
+      await this.renderPage(this.currentPage);
+    } catch (err) {
+      new import_obsidian.Notice("Error loading PDF: " + (err.message || err.toString()));
+    }
+  }
+
+  async renderPage(pageNum) {
+    if (!this.pdfDoc) return;
+    try {
+      const page = await this.pdfDoc.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 1.5 });
+
+      this.setCanvasSize(viewport.width, viewport.height);
+
+      // Clear the drawing layer when navigating pages
+      const drawCtx = this.drawCanvas.getContext("2d");
+      if (drawCtx) drawCtx.clearRect(0, 0, this.drawCanvas.width, this.drawCanvas.height);
+
+      const ctx = this.bgCanvas.getContext("2d");
+      await page.render({ canvasContext: ctx, viewport }).promise;
+
+      this.pageInfoEl.textContent = `Page ${pageNum} / ${this.totalPages}`;
+    } catch (err) {
+      new import_obsidian.Notice("Error rendering page: " + (err.message || err.toString()));
+    }
+  }
+
+  setupDrawingEvents() {
+    const getPos = (e) => {
+      const rect = this.drawCanvas.getBoundingClientRect();
+      const scaleX = this.drawCanvas.width / rect.width;
+      const scaleY = this.drawCanvas.height / rect.height;
+      const src = e.touches ? e.touches[0] : e;
+      return {
+        x: (src.clientX - rect.left) * scaleX,
+        y: (src.clientY - rect.top) * scaleY,
+      };
+    };
+
+    const onStart = (e) => {
+      if (e.touches) e.preventDefault();
+      this.isDrawing = true;
+      const pos = getPos(e);
+      this.lastX = pos.x;
+      this.lastY = pos.y;
+    };
+
+    const onMove = (e) => {
+      if (!this.isDrawing) return;
+      if (e.touches) e.preventDefault();
+      const ctx = this.drawCanvas.getContext("2d");
+      if (!ctx) return;
+      const pos = getPos(e);
+      ctx.beginPath();
+      ctx.moveTo(this.lastX, this.lastY);
+      ctx.lineTo(pos.x, pos.y);
+      if (this.currentTool === "eraser") {
+        ctx.globalCompositeOperation = "destination-out";
+        ctx.strokeStyle = "rgba(0,0,0,1)";
+        ctx.lineWidth = this.lineWidth * 3;
+      } else {
+        ctx.globalCompositeOperation = "source-over";
+        ctx.strokeStyle = this.currentColor;
+        ctx.lineWidth = this.lineWidth;
+      }
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.stroke();
+      this.lastX = pos.x;
+      this.lastY = pos.y;
+    };
+
+    const onEnd = () => {
+      this.isDrawing = false;
+    };
+
+    this.drawCanvas.addEventListener("mousedown", onStart);
+    this.drawCanvas.addEventListener("mousemove", onMove);
+    this.drawCanvas.addEventListener("mouseup", onEnd);
+    this.drawCanvas.addEventListener("mouseleave", onEnd);
+    this.drawCanvas.addEventListener("touchstart", onStart, { passive: false });
+    this.drawCanvas.addEventListener("touchmove", onMove, { passive: false });
+    this.drawCanvas.addEventListener("touchend", onEnd);
+  }
+
+  async saveSketch() {
+    const w = this.bgCanvas.width;
+    const h = this.bgCanvas.height;
+    const out = document.createElement("canvas");
+    out.width = w;
+    out.height = h;
+    const ctx = out.getContext("2d");
+    if (!ctx) {
+      new import_obsidian.Notice("Failed to create output canvas.");
+      return;
+    }
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(this.bgCanvas, 0, 0);
+    ctx.drawImage(this.drawCanvas, 0, 0);
+
+    out.toBlob((blob) => {
+      if (!blob) {
+        new import_obsidian.Notice("Failed to generate image.");
+        return;
+      }
+      blob.arrayBuffer().then(async (arrayBuffer) => {
+        let folderPath = "images";
+        if (this.file && this.file.parent) {
+          const parentPath = this.file.parent.path;
+          folderPath = parentPath === "/" ? "images" : `${parentPath}/images`;
+        }
+        const folder = this.app.vault.getAbstractFileByPath(folderPath);
+        if (!folder) {
+          await this.app.vault.createFolder(folderPath);
+        }
+        const now = new Date();
+        const yyyy = now.getFullYear();
+        const mm = String(now.getMonth() + 1).padStart(2, "0");
+        const dd = String(now.getDate()).padStart(2, "0");
+        const hh = String(now.getHours()).padStart(2, "0");
+        const min = String(now.getMinutes()).padStart(2, "0");
+        const ss = String(now.getSeconds()).padStart(2, "0");
+        const filename = `sketch-${yyyy}${mm}${dd}-${hh}${min}${ss}.png`;
+        const filePath = `${folderPath}/${filename}`;
+        await this.app.vault.createBinary(filePath, arrayBuffer);
+        this.editor.replaceSelection(`![[${filename}]]`);
+        new import_obsidian.Notice("Sketch saved and inserted!");
+        this.close();
+      }).catch((err) => {
+        new import_obsidian.Notice("Error saving sketch: " + (err.message || err.toString()));
+      });
+    }, "image/png");
+  }
+
+  onClose() {
     this.contentEl.empty();
   }
 };
