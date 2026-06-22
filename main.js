@@ -308,6 +308,7 @@ var CameraModal = class extends import_obsidian.Modal {
 
 var PDFJS_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
 var PDFJS_WORKER_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+var PDFLIB_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js";
 
 var PDFSketchModal = class extends import_obsidian.Modal {
   constructor(app, editor, file) {
@@ -330,6 +331,9 @@ var PDFSketchModal = class extends import_obsidian.Modal {
     __publicField(this, "lineWidth", 3);
     __publicField(this, "lastX", 0);
     __publicField(this, "lastY", 0);
+    // Loaded PDF TFile (for overwrite)
+    __publicField(this, "currentPdfFile", null);
+    __publicField(this, "saveBtn", null);
     this.editor = editor;
     this.file = file;
   }
@@ -383,7 +387,8 @@ var PDFSketchModal = class extends import_obsidian.Modal {
 
     // ── Save button ───────────────────────────────────────────────────────────
     const controls = contentEl.createDiv({ cls: "camera-controls" });
-    const saveBtn = controls.createEl("button", { text: "Save & Insert", cls: "mod-cta" });
+    this.saveBtn = controls.createEl("button", { text: "Save & Insert", cls: "mod-cta" });
+    const saveBtn = this.saveBtn;
 
     // ── Wire up event handlers ────────────────────────────────────────────────
     loadBtn.addEventListener("click", async () => {
@@ -480,6 +485,18 @@ var PDFSketchModal = class extends import_obsidian.Modal {
     });
   }
 
+  async ensurePDFLib() {
+    if (window.PDFLib) return;
+    await new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = PDFLIB_CDN;
+      script.onload = resolve;
+      script.onerror = () =>
+        reject(new Error("Could not load pdf-lib. An internet connection is required for the first use."));
+      document.head.appendChild(script);
+    });
+  }
+
   async loadPDF(pdfPath) {
     try {
       await this.ensurePDFJS();
@@ -494,7 +511,9 @@ var PDFSketchModal = class extends import_obsidian.Modal {
       this.pdfDoc = await loadingTask.promise;
       this.totalPages = this.pdfDoc.numPages;
       this.currentPage = 1;
+      this.currentPdfFile = this.app.vault.getAbstractFileByPath(pdfPath);
       this.pageNavEl.classList.remove("hidden");
+      if (this.saveBtn) this.saveBtn.textContent = "Save to PDF";
       await this.renderPage(this.currentPage);
     } catch (err) {
       new import_obsidian.Notice("Error loading PDF: " + (err.message || err.toString()));
@@ -581,53 +600,50 @@ var PDFSketchModal = class extends import_obsidian.Modal {
   }
 
   async saveSketch() {
-    const w = this.bgCanvas.width;
-    const h = this.bgCanvas.height;
-    const out = document.createElement("canvas");
-    out.width = w;
-    out.height = h;
-    const ctx = out.getContext("2d");
-    if (!ctx) {
-      new import_obsidian.Notice("Failed to create output canvas.");
+    if (!this.currentPdfFile) {
+      new import_obsidian.Notice("No PDF loaded. Please load a PDF first.");
       return;
     }
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, w, h);
-    ctx.drawImage(this.bgCanvas, 0, 0);
-    ctx.drawImage(this.drawCanvas, 0, 0);
 
-    out.toBlob((blob) => {
-      if (!blob) {
-        new import_obsidian.Notice("Failed to generate image.");
-        return;
-      }
-      blob.arrayBuffer().then(async (arrayBuffer) => {
-        let folderPath = "images";
-        if (this.file && this.file.parent) {
-          const parentPath = this.file.parent.path;
-          folderPath = parentPath === "/" ? "images" : `${parentPath}/images`;
-        }
-        const folder = this.app.vault.getAbstractFileByPath(folderPath);
-        if (!folder) {
-          await this.app.vault.createFolder(folderPath);
-        }
-        const now = new Date();
-        const yyyy = now.getFullYear();
-        const mm = String(now.getMonth() + 1).padStart(2, "0");
-        const dd = String(now.getDate()).padStart(2, "0");
-        const hh = String(now.getHours()).padStart(2, "0");
-        const min = String(now.getMinutes()).padStart(2, "0");
-        const ss = String(now.getSeconds()).padStart(2, "0");
-        const filename = `sketch-${yyyy}${mm}${dd}-${hh}${min}${ss}.png`;
-        const filePath = `${folderPath}/${filename}`;
-        await this.app.vault.createBinary(filePath, arrayBuffer);
-        this.editor.replaceSelection(`![[${filename}]]`);
-        new import_obsidian.Notice("Sketch saved and inserted!");
-        this.close();
-      }).catch((err) => {
-        new import_obsidian.Notice("Error saving sketch: " + (err.message || err.toString()));
-      });
-    }, "image/png");
+    // Export only the drawing layer as a transparent PNG
+    const sketchBytes = await new Promise((resolve, reject) => {
+      this.drawCanvas.toBlob((blob) => {
+        if (!blob) { reject(new Error("Failed to export sketch.")); return; }
+        blob.arrayBuffer().then(resolve).catch(reject);
+      }, "image/png");
+    });
+
+    try {
+      await this.ensurePDFLib();
+    } catch (err) {
+      new import_obsidian.Notice(err.message);
+      return;
+    }
+
+    try {
+      const { PDFDocument } = window.PDFLib;
+
+      // Load original PDF bytes from vault
+      const originalBytes = await this.app.vault.readBinary(this.currentPdfFile);
+      const pdfLibDoc = await PDFDocument.load(originalBytes);
+
+      // Embed sketch PNG (transparent where no ink)
+      const pngImage = await pdfLibDoc.embedPng(sketchBytes);
+
+      // Stretch PNG over the full page (PDF coordinates: origin = bottom-left)
+      const page = pdfLibDoc.getPage(this.currentPage - 1);
+      const { width, height } = page.getSize();
+      page.drawImage(pngImage, { x: 0, y: 0, width, height });
+
+      // Overwrite the original file in the vault
+      const savedBytes = await pdfLibDoc.save();
+      await this.app.vault.modifyBinary(this.currentPdfFile, savedBytes.buffer);
+
+      new import_obsidian.Notice("Sketch saved to PDF!");
+      this.close();
+    } catch (err) {
+      new import_obsidian.Notice("Error saving to PDF: " + (err.message || err.toString()));
+    }
   }
 
   onClose() {
